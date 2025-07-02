@@ -36,10 +36,6 @@ ECB_SERIES = {
         "flow_ref": "ICP",
         "key_values": "M.U2.N.000000.4.ANR" # M=Monthly, U2=Euro Area, N=National, 000000=all items, 4=HICP, ANR=Annual rate of change
     },
-    # Main Refinancing Operations (MRO) Rate - Euro Area, Daily
-    # This specific code (RT.MM.EURIBOR1YD) is for Euribor, not the MRO rate directly.
-    # The actual MRO rate is under dataflow "FM" but requires specific key values like "M.U2.EUR.RT.BPCU" or similar depending on the exact series (e.g. key policy rates).
-    # For now, let's use a known FX rate as a simpler example for ECB until we confirm the MRO rate code:
     # Example: Daily FX Ref Rate, Euro Area (U2), US Dollar (USD), Reference rate (EUR_USD_N_A)
     "EU_EUR_USD_FX_RATE": {
         "flow_ref": "EXR",
@@ -125,7 +121,6 @@ def fetch_ecb_data(flow_ref, key_values):
         # ECB data structure is complex (SDMX-JSON), requires careful parsing
         # This is a simplified parser for common time series structure for dataSets[0]
         try:
-            # Assuming the relevant series are in dataSets[0]['series']
             data_sets = data.get('dataSets', [])
             if not data_sets:
                 print(f"No dataSets found for ECB {flow_ref}/{key_values}.")
@@ -147,15 +142,13 @@ def fetch_ecb_data(flow_ref, key_values):
                         value = value_obj[0] # The actual value is usually the first element in the list
 
                         # Map observation keys to time periods using 'structure'
-                        time_dimension_index = data['structure']['dimensions']['observation'][0]['values'][int(obs_key_index_str.split(':')[0])].get('id')
-                        time_period_id = data['structure']['dimensions']['observation'][0]['values'][int(obs_key_index_str.split(':')[0])].get('id')
-
-                        # Get the time period from the structure
-                        time_period_ref = int(obs_key_index_str.split(":")[0]) # This index refers to the time period value in structure.dimensions.observation[0].values
-                        time_period_str = data['structure']['dimensions']['observation'][0]['values'][time_period_ref]['name']
+                        # This part of ECB parsing can be tricky and requires understanding the structure.
+                        # For now, we'll try to get the time dimension value.
+                        time_period_ref_index = int(obs_key_index_str.split(":")[0]) # This index refers to the time period value in structure.dimensions.observation[0].values
+                        time_period_str = data['structure']['dimensions']['observation'][0]['values'][time_period_ref_index]['name']
                         
                         processed_data.append({
-                            "date": time_period_str, # e.g., "2023-M12", might need further parsing
+                            "date": time_period_str, # e.g., "2023-M12", might need further parsing for full date objects
                             "value": float(value),
                             "flow_ref": flow_ref,
                             "key_values": key_values,
@@ -180,26 +173,18 @@ def fetch_ecb_data(flow_ref, key_values):
 def ingest_economic_data():
     """
     Fetches economic data from FRED and ECB APIs and stores it in GCS.
-    This endpoint is designed to be triggered by Cloud Scheduler via Pub/Sub.
+    This endpoint is designed to be triggered by Cloud Scheduler via Pub/Sub,
+    but this version is modified for direct manual POST testing.
     """
     print(f"Ingestion process started at {datetime.now()} UTC")
 
-    # This part processes the Pub/Sub message, if any.
-    # For local testing, a simple POST to this endpoint will work.
-    # For actual Cloud Scheduler -> Pub/Sub trigger, Cloud Run receives a Pub/Sub message.
+    # --- TEMPORARY MODIFICATION FOR MANUAL TESTING ---
+    # Comment out or remove these lines when setting up with Cloud Scheduler/PubSub.
     if request.method == 'POST':
-        envelope = request.get_json()
-        if not envelope:
-            msg = "no Pub/Sub message received"
-            print(f"alert: {msg}")
-            return f"Bad Request: {msg}", 400
-        if not isinstance(envelope, dict) or "message" not in envelope:
-            msg = "invalid Pub/Sub message format"
-            print(f"alert: {msg}")
-            return f"Bad Request: {msg}", 400
-
-        pubsub_message = envelope["message"]
-        print(f"Received Pub/Sub message: {pubsub_message.get('data', 'No data')}") # You can encode info in 'data' field
+        print("Received manual POST request. Proceeding with ingestion...")
+    else:
+        return "Method Not Allowed", 405 # Ensure it's still POST only
+    # --- END TEMPORARY MODIFICATION ---
 
     ingestion_results = {}
 
@@ -207,7 +192,7 @@ def ingest_economic_data():
     for name, series_id in FRED_SERIES.items():
         data = fetch_fred_data(series_id)
         if data:
-            # Filename example: fred_us_unemployment_rate.json
+            # Filename example: economic_data/fred/us_unemployment_rate.json
             filename = f"economic_data/fred/{name.lower()}.json"
             if upload_to_gcs(data, filename):
                 ingestion_results[name] = {"status": "success", "count": len(data), "gcs_path": filename}
@@ -220,7 +205,7 @@ def ingest_economic_data():
     for name, config in ECB_SERIES.items():
         data = fetch_ecb_data(config["flow_ref"], config["key_values"])
         if data:
-            # Filename example: ecb_eu_hicp.json
+            # Filename example: economic_data/ecb/eu_hicp.json
             filename = f"economic_data/ecb/{name.lower()}.json"
             if upload_to_gcs(data, filename):
                 ingestion_results[name] = {"status": "success", "count": len(data), "gcs_path": filename}
