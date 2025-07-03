@@ -98,10 +98,10 @@ def fetch_fred_data(series_id):
         print(f"Successfully fetched {len(processed_data)} observations for {series_id}.")
         return processed_data
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching FRED data for {series_id}: {e}")
+        print(f"ERROR fetching FRED data for {series_id}: {e}")
         return []
     except json.JSONDecodeError as e:
-        print(f"Error decoding FRED JSON for {series_id}: {e}")
+        print(f"ERROR decoding FRED JSON for {series_id}: {e}")
         print(f"FRED Response content: {response.text}") # Print full response for debugging
         return []
 
@@ -111,60 +111,68 @@ def fetch_ecb_data(flow_ref, key_values):
     headers = {"Accept": "application/json"} # Request JSON format
 
     try:
-        print(f"Fetching ECB data for flow: {flow_ref}, keys: {key_values}")
+        print(f"Fetching ECB data from URL: {base_url}")
         response = requests.get(base_url, headers=headers)
-        response.raise_for_status()
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
 
         data = response.json()
-        
+        print(f"ECB API raw response status: {response.status_code}") # Added logging
+        # print(f"ECB API raw response content (first 500 chars): {response.text[:500]}") # Added logging (uncomment for verbose)
+
         processed_data = []
         # ECB data structure is complex (SDMX-JSON), requires careful parsing
-        # This is a simplified parser for common time series structure for dataSets[0]
         try:
             data_sets = data.get('dataSets', [])
             if not data_sets:
-                print(f"No dataSets found for ECB {flow_ref}/{key_values}.")
+                print(f"ECB PARSING ERROR: No 'dataSets' found for {flow_ref}/{key_values}. Raw response might be empty or malformed.")
                 return []
             
             series_data = data_sets[0].get('series', {})
-            
-            # Extract relevant dimensions and observation values
+            if not series_data:
+                print(f"ECB PARSING ERROR: No 'series' data in first dataSet for {flow_ref}/{key_values}. Raw response might be empty or malformed.")
+                return []
+
             for series_key, series_value in series_data.items():
                 observations = series_value.get('observations', {})
-                for obs_key_index_str, obs_val_index_list in observations.items():
-                    # obs_key_index_str is a string like "0:0:0:0:0"
-                    # obs_val_index_list is a list like [0] pointing to dataSets[0].observations
-                    
-                    # Extract the actual value from dataSets[0].observations
-                    actual_value_index = obs_val_index_list[0] # Usually 0
-                    value_obj = data_sets[0]['observations'].get(str(actual_value_index))
-                    if value_obj:
-                        value = value_obj[0] # The actual value is usually the first element in the list
+                if not observations:
+                    print(f"ECB PARSING WARNING: No 'observations' found in series {series_key} for {flow_ref}/{key_values}.")
+                    continue # Skip to next series if no observations
 
-                        # Map observation keys to time periods using 'structure'
-                        # This part of ECB parsing can be tricky and requires understanding the structure.
-                        # For now, we'll try to get the time dimension value.
-                        time_period_ref_index = int(obs_key_index_str.split(":")[0]) # This index refers to the time period value in structure.dimensions.observation[0].values
-                        time_period_str = data['structure']['dimensions']['observation'][0]['values'][time_period_ref_index]['name']
-                        
-                        processed_data.append({
-                            "date": time_period_str, # e.g., "2023-M12", might need further parsing for full date objects
-                            "value": float(value),
-                            "flow_ref": flow_ref,
-                            "key_values": key_values,
-                            "source": "ECB"
-                        })
-            # Sort by date, assuming 'date' is comparable (e.g., "YYYY-MM" or "YYYY-MM-DD")
-            processed_data.sort(key=lambda x: x['date'])
-            print(f"Successfully fetched {len(processed_data)} observations for ECB {flow_ref}/{key_values}.")
+                for obs_key_index_str, obs_val_index_list in observations.items():
+                    actual_value_index = obs_val_index_list[0]
+                    value_obj = data_sets[0]['observations'].get(str(actual_value_index))
+                    if not value_obj:
+                        print(f"ECB PARSING WARNING: Missing value object for obs_key_index {obs_key_index_str} in dataSets[0].observations.")
+                        continue # Skip to next observation
+
+                    value = value_obj[0]
+                    
+                    time_period_ref_index = int(obs_key_index_str.split(":")[0])
+                    # Ensure time_period_ref_index is within bounds of structure.dimensions.observation[0].values
+                    if time_period_ref_index >= len(data['structure']['dimensions']['observation'][0]['values']):
+                        print(f"ECB PARSING ERROR: Time period index {time_period_ref_index} out of bounds for structure.dimensions.observation values.")
+                        continue # Skip to next observation
+
+                    time_period_str = data['structure']['dimensions']['observation'][0]['values'][time_period_ref_index]['name']
+                    
+                    processed_data.append({
+                        "date": time_period_str,
+                        "value": float(value),
+                        "flow_ref": flow_ref,
+                        "key_values": key_values,
+                        "source": "ECB"
+                    })
+            processed_data.sort(key=lambda x: x['date']) # Sort chronologically
+            print(f"Successfully fetched and parsed {len(processed_data)} observations for ECB {flow_ref}/{key_values}.")
             return processed_data
         except (KeyError, IndexError, ValueError, TypeError) as parse_error:
-            print(f"ERROR: Could not parse ECB data for {flow_ref}/{key_values}. Data structure might have changed or is unexpected: {parse_error}")
-            # print(json.dumps(data, indent=2)) # Uncomment this line to dump the full JSON for manual inspection if parsing fails
+            print(f"CRITICAL ECB PARSING ERROR for {flow_ref}/{key_values}: {parse_error}")
+            print(f"Problematic JSON structure snippet: {json.dumps(data, indent=2)[:1000]}...") # Dump start of JSON for debugging
             return []
 
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching ECB data for {flow_ref}/{key_values}: {e}")
+        print(f"ERROR fetching ECB data for {flow_ref}/{key_values} (Network/HTTP Error): {e}")
+        # print(f"ECB API response text on error: {response.text}") # Uncomment for very verbose error
         return []
 
 # --- Main Ingestion Logic (Cloud Run Entrypoint) ---
@@ -190,29 +198,29 @@ def ingest_economic_data():
 
     # --- Fetch and Upload FRED Data ---
     for name, series_id in FRED_SERIES.items():
+        print(f"Attempting to fetch FRED series: {name} ({series_id})") # Added logging
         data = fetch_fred_data(series_id)
         if data:
-            # Filename example: economic_data/fred/us_unemployment_rate.json
             filename = f"economic_data/fred/{name.lower()}.json"
             if upload_to_gcs(data, filename):
                 ingestion_results[name] = {"status": "success", "count": len(data), "gcs_path": filename}
             else:
                 ingestion_results[name] = {"status": "failed_upload", "message": "GCS upload failed."}
         else:
-            ingestion_results[name] = {"status": "failed_fetch", "message": "No data fetched from FRED or API error."}
+            ingestion_results[name] = {"status": "failed_fetch", "message": f"No data fetched from FRED for {name} or API error."} # More specific message
 
     # --- Fetch and Upload ECB Data ---
     for name, config in ECB_SERIES.items():
+        print(f"Attempting to fetch ECB series: {name} (Flow: {config['flow_ref']}, Keys: {config['key_values']})") # Added logging
         data = fetch_ecb_data(config["flow_ref"], config["key_values"])
         if data:
-            # Filename example: economic_data/ecb/eu_hicp.json
             filename = f"economic_data/ecb/{name.lower()}.json"
             if upload_to_gcs(data, filename):
                 ingestion_results[name] = {"status": "success", "count": len(data), "gcs_path": filename}
             else:
                 ingestion_results[name] = {"status": "failed_upload", "message": "GCS upload failed."}
         else:
-            ingestion_results[name] = {"status": "failed_fetch", "message": "No data fetched from ECB or API error."}
+            ingestion_results[name] = {"status": "failed_fetch", "message": f"No data fetched from ECB for {name} or API error."} # More specific message
 
     print(f"Ingestion process finished at {datetime.now()} UTC")
     return jsonify({"ingestion_summary": ingestion_results}), 200
